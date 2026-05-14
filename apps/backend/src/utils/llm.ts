@@ -1,88 +1,86 @@
 import { environment } from "./constants.js";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 
-const client = new Anthropic({
-  apiKey: environment.claudeApiKey,
+const client = new OpenAI({
+  apiKey: environment.openaiApiKey,
 });
 
-export async function prompt(prompt: string) {
-  const systemPrompt = `
-  You are an Excalidraw diagram expert. Convert any diagram request into valid Excalidraw clipboard JSON.
-  OUTPUT RULES:
+/**
+ * Sanitize Mermaid output: fix common model hallucinations
+ * before sending to the client.
+ */
+function sanitize(raw: string): string {
+  return raw
+    .replace(/^```(?:mermaid)?\s*/im, "")
+    .replace(/\s*```\s*$/im, "")
+    .split("\n")
+    .map((line) => {
+      // normalize flowchart -> graph
+      line = line.replace(/^(\s*)flowchart\s+(TD|LR|BT|RL)/i, "$1graph $2");
+      // fix --[ typo -> -->
+      line = line.replace(/--\[/g, "-->");
+      // fix ---> -> -->
+      line = line.replace(/--->/g, "-->");
+      // fix stadium shapes ([text]) -> (text)
+      line = line.replace(/\(\[([^\]]*)\]\)/g, "($1)");
+      // fix hexagon {{text}} -> {text}
+      line = line.replace(/\{\{([^}]*)\}\}/g, "{$1}");
+      return line;
+    })
+    .join("\n")
+    .trim();
+}
 
-    Return raw JSON only — no markdown, no explanation, no code blocks
-    Always use "type": "excalidraw/clipboard" as root
-    Always include "files": {} at root level
-    
-    SCHEMA:
-    json{
-      "type": "excalidraw/clipboard",
-      "elements": [
-        {
-          "id": "string",
-          "type": "rectangle | ellipse | diamond | text | line | arrow",
-          "x": 0, "y": 0, "width": 100, "height": 50, "angle": 0,
-          "strokeColor": "#000000", "backgroundColor": "transparent",
-          "fillStyle": "solid | hachure | cross-hatch | zigzag",
-          "strokeWidth": 2, "strokeStyle": "solid | dashed | dotted",
-          "roughness": 0, "opacity": 100, "seed": 123456,
-          "version": 1, "versionNonce": 123456789, "index": "a1",
-          "isDeleted": false, "groupIds": [], "frameId": null,
-          "boundElements": [{ "type": "arrow | text", "id": "string" }],
-          "updated": 1710000000000, "link": null, "locked": false,
-          "roundness": { "type": 1, "value": 0 },
-          "_text_only": {
-            "text": "string", "fontSize": 16, "fontFamily": 1,
-            "textAlign": "center", "verticalAlign": "middle",
-            "containerId": "parent_id | null"
-          },
-          "_arrow_line_only": {
-            "points": [[0,0],[0,80]],
-            "startArrowhead": null, "endArrowhead": "arrow",
-            "startBinding": { "elementId": "id", "focus": 0, "gap": 1 },
-            "endBinding": { "elementId": "id", "focus": 0, "gap": 1 }
-          }
-        }
+export async function prompt(userQuery: string): Promise<string> {
+  const systemPrompt = `You are a Mermaid diagram generator.
+
+Output ONLY valid Mermaid code starting with "graph TD" or "graph LR".
+No markdown. No backticks. No explanation. Just the raw Mermaid code.
+
+Node shapes you are allowed to use:
+  A[Label]   = rectangle
+  A(Label)   = rounded rectangle  
+  A{Label}   = diamond
+
+Arrow syntax you MUST use:
+  A --> B          (plain connection)
+  A -- text --> B  (labeled connection)
+
+DO NOT use:
+  ([Label])  - invalid
+  --[        - invalid  
+  ->         - invalid
+  --->       - invalid
+  {{Label}}  - invalid
+  >Label]    - invalid
+
+Example of correct output:
+graph TD
+  A(Start) --> B[Enter username and password]
+  B --> C{Credentials valid?}
+  C -- Yes --> D[Load dashboard]
+  C -- No --> E[Show error message]
+  E --> B
+  D --> F(End)`;
+
+  const generate = async (): Promise<string> => {
+    const response = await client.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 2000,
+      temperature: 0.2,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `Generate a Mermaid diagram for: ${userQuery}` },
       ],
-      "files": {}
-    }
-    ELEMENT RULES:
-    
-    Every shape needs a paired text element with matching containerId
-    Every arrow needs startBinding and endBinding pointing to shape IDs
-    Arrow points must be [[0,0],[dx,dy]] relative to arrow's own x,y
-    IDs must be unique strings — e.g. "rect1", "arr2", "txt3"
-    index must be sequential — "a1", "a2", "a3"...
-    boundElements on shapes must list all connected arrows and contained text
-    Remove _text_only and _arrow_line_only keys from final output — add their fields directly on the element when applicable
-    
-    SHAPE CONVENTIONS:
-    ShapeTypeUse forellipseStart / EndTerminal nodesrectangleProcess / StepActions, tasksdiamondDecisionYes/No branchesrectangle + dashedError / WarningError states
-    STYLE DEFAULTS:
-    
-    roughness: 0 — clean lines
-    strokeWidth: 2
-    fontSize: 16, fontFamily: 1
-    Arrow labels: text element with containerId set to the arrow ID
-    
-    LAYOUT:
-    
-    Top-to-bottom flow: start at y: 20, increment y by ~90 per step
-    Side branches: offset x by ±200 from main flow
-    Center main flow at x: 300
-  `;
+    });
+    return sanitize(response.choices[0]!.message.content!);
+  };
 
-  const response = await client.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 16000,
-    system: systemPrompt,
-    messages: [
-      {
-        role: "user",
-        content: prompt,
-      },
-    ],
-  });
+  // Try up to 2 times if the output looks malformed
+  let result = await generate();
+  if (!result.startsWith("graph")) {
+    result = await generate();
+  }
 
-  return response.content[0]!.text;
+  return result;
 }
