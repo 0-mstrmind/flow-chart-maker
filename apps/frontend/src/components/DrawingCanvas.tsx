@@ -8,6 +8,7 @@ import "@excalidraw/excalidraw/index.css";
 import { parseMermaidToExcalidraw } from "@excalidraw/mermaid-to-excalidraw";
 import { useQueryStore } from "../store/query";
 
+
 /** Normalize Mermaid syntax to only use shapes/arrows supported by @excalidraw/mermaid-to-excalidraw */
 function sanitizeMermaid(code: string): string {
   // Process line by line to avoid cross-line regex corruption
@@ -43,7 +44,7 @@ function sanitizeMermaid(code: string): string {
 }
 
 const DrawingCanvas = () => {
-  const { data } = useQueryStore();
+  const { data, setCurrentMermaid } = useQueryStore();
   const excalidrawAPIRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const [isConverting, setIsConverting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -70,6 +71,8 @@ const DrawingCanvas = () => {
         animate: true,
         duration: 400,
       });
+      // Persist the rendered Mermaid so the edit feature can use it as context
+      setCurrentMermaid(cleaned);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[DrawingCanvas] Parse failed:", msg);
